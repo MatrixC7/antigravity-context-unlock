@@ -1,0 +1,32 @@
+# Pacman PostTransaction hook template for antigravity-context-unlock
+# (Arch Linux / EndeavourOS / CachyOS).
+#
+# IMPORTANT NOTES BEFORE INSTALLING TO /etc/pacman.d/hooks/:
+#
+# 1. Replace /usr/local/share/antigravity-context-unlock below with the ABSOLUTE
+#    path to a root-owned directory containing antigravity_context_unlock.py.
+#    A leading "~" or "$HOME" is NOT expanded: libalpm parses this file directly
+#    and invokes the command via execv(3) without a shell.
+#
+# 2. Root trust boundary: Pacman hooks execute as root. Both the script file and
+#    every parent directory in its path MUST be owned by root:root and not
+#    writable by unprivileged users (e.g. install with `sudo install -o root -g root`).
+#    Do NOT point Exec at a clone inside a normal user's writable home directory.
+#
+# 3. Backup pairing across package upgrades: when the `antigravity` package
+#    installs a new upstream binary, an existing `.ctxunlock-backup` from the
+#    previous build will NOT match the new binary. By design, `patch` refuses to
+#    overwrite a mismatched backup (exit code 3) so you never lose provenance;
+#    archive or remove the previous build's backup + `.json` sidecar before
+#    re-patching a newly verified build.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = antigravity
+
+[Action]
+Description = Patching Antigravity desktop engine (language_server) to unlock the 256K context limit...
+When = PostTransaction
+Exec = /usr/bin/python3 /usr/local/share/antigravity-context-unlock/antigravity_context_unlock.py patch --yes

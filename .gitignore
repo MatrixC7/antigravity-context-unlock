@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*.patched
+*.ctxunlock-backup
+*.ctxunlock-backup.json
+captures/
+run-*/

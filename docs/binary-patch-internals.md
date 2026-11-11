@@ -191,7 +191,10 @@ cortex.(*CascadeManager).getCascadeConfig                        0x7a4f9ac (调�
    在执行任何写入前，脚本检查同目录下的 `<binary>.ctxunlock-backup` 及其侧车文件 `<binary>.ctxunlock-backup.json`，区分六种状态：
    - `missing`：备份不存在 → 先通过临时文件 + `fsync` + **`os.link`** 原子发布备份与侧车，复核变为 `usable` 后才允许继续修补；
    - `usable`：普通可读文件，SHA256 与当前原版二进制一致，且侧车记录一致 → 直接复用；
-   - `wrong-build`（属于旧版本的备份）、`dangling`（悬空符号链接）、`unreadable`、`bad-meta`（侧车哈希不一致） → **一律以退出码 `3` 拒绝提交补丁**，目标二进制保持原样。
+   - `wrong-build`（属于旧版本的备份）：默认以退出码 `3` 拒绝；显式使用 `patch --yes --refresh-backup` 时，为当前已通过结构校验的原版快照生成新备份与侧车，均在临时文件中写完并 `fsync` 后，再以 `os.replace` 原子替换旧备份，更新侧车并同步目录，复核为 `usable` 后才允许修补。仅保留最新构建的一份备份，不生成历史归档，也不自动清理旧工具留下的归档。
+   - 备份与侧车的替换并非整体事务：先移除旧侧车，避免中断时新备份与旧元数据冲突；新备份替换失败时旧备份仍在，侧车替换失败时新备份已完整就位，但目标二进制均不修补。侧车缺失可按既有内容配对逻辑安全重试与还原。
+   - `dangling`（悬空符号链接）、`unreadable`、`bad-meta`（侧车哈希不一致）仍以退出码 `3` 拒绝提交补丁；刷新操作也拒绝替换符号链接或非普通文件。
+   - `--refresh-backup` 不绕过目标函数/指令窗口校验，不改变 `--strict-build` 行为；无 `--yes` 时仅预览，已修补目标不刷新备份。
 2. **单快照决策与写前身份守卫（`_snapshot` & `_identity_changed`）**：
    每个命令只在启动时读取一次二进制文件内存快照。在即将调用 `atomic_write` 替换目标前，重新执行 `os.stat` 比对 `(st_ino, st_dev, st_size, st_mtime_ns)`；若期间软件包管理器升级替换了磁盘文件，脚本立即中止。
 3. **单快照内容级配对还原（`cmd_restore` & `_pairs_with`）**：

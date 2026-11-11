@@ -76,8 +76,9 @@ Safety guarantees
 * `--strict-build` optionally pins the whole-file SHA256 to `KNOWN_BUILDS`.
 * Every command operates on a single in-memory snapshot and re-verifies on-disk
   file identity (`ino`, `dev`, `size`, `mtime_ns`) right before replacement.
-* Patching never commits without a verified pristine backup published via
-  `os.link` plus a `.ctxunlock-backup.json` SHA256 sidecar.
+* Patching never commits without a verified pristine backup, created via
+  `os.link` or refreshed via `os.replace`; no historical backups are retained.
+  A `.ctxunlock-backup.json` SHA256 sidecar records the original digest.
 * Writes are atomic (same-directory temp file + `fsync` + `os.replace` +
   directory `fsync`), and `restore` validates content-level pairing from a
   single backup read before restoring.
@@ -103,7 +104,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "1.2.1"
+VERSION = "1.2.3"
 BACKUP_SUFFIX = ".ctxunlock-backup"
 DEFAULT_BINARY = "/opt/Antigravity/resources/bin/language_server"
 
@@ -597,15 +598,23 @@ def read_file(path: str) -> bytes:
         return fh.read()
 
 
-def write_backup(binary: str, pristine: bytes) -> None:
-    """Publish a pristine snapshot plus its sidecar metadata.
+def write_backup(binary: str, pristine: bytes, *, replace_existing: bool = False) -> None:
+    """Publish a complete pristine snapshot and sidecar, without retaining history.
 
-    The snapshot is written to a temporary file, fsynced, and published with
-    `os.link` so an incomplete backup never appears at the canonical path and an
-    existing file is never silently overwritten.
+    New backups use `os.link` to avoid silently overwriting an existing file.
+    Explicit refresh stages and fsyncs both files before atomically replacing
+    the backup. The old sidecar is removed first so an interrupted refresh cannot
+    leave a new backup paired with stale metadata. The two files are not a
+    transaction; a missing sidecar is safe because restore checks content pairing.
     """
-    bp = backup_path(binary)
-    directory = os.path.dirname(os.path.abspath(binary))
+    bp = os.path.abspath(backup_path(binary))
+    mp = os.path.abspath(backup_meta_path(binary))
+    if replace_existing:
+        for target in (bp, mp):
+            if os.path.lexists(target) and (
+                    os.path.islink(target) or not os.path.isfile(target)):
+                raise BinaryError(f"refusing to replace non-regular backup file: {target}")
+    directory = os.path.dirname(bp)
     tmp = mtmp = None
     try:
         fd, tmp = tempfile.mkstemp(prefix=".ctxunlock-bk-", dir=directory)
@@ -613,7 +622,6 @@ def write_backup(binary: str, pristine: bytes) -> None:
             fh.write(pristine)
             fh.flush()
             os.fsync(fh.fileno())
-        os.link(tmp, bp)
 
         meta = {
             "original_sha256": _sha256(pristine),
@@ -627,10 +635,22 @@ def write_backup(binary: str, pristine: bytes) -> None:
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
+        if replace_existing:
+            if os.path.lexists(mp):
+                os.unlink(mp)
+            os.replace(tmp, bp)
+            os.replace(mtmp, mp)
+        else:
+            os.link(tmp, bp)
+            try:
+                os.link(mtmp, mp)
+            except FileExistsError:
+                pass      # an older sidecar is fine; it is validated separately
+        dfd = os.open(directory, os.O_RDONLY)
         try:
-            os.link(mtmp, backup_meta_path(binary))
-        except FileExistsError:
-            pass          # an older sidecar is fine; it is validated separately
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
     except FileExistsError as exc:
         raise BinaryError(
             f"backup path {bp} is already occupied but is not a usable backup; "
@@ -836,6 +856,16 @@ def cmd_patch(args) -> int:
 
     bp = backup_path(path)
     status, detail = check_backup(path, digest)
+    if status == "wrong-build" and args.refresh_backup:
+        if not args.yes:
+            print(f"\nwould replace {bp} and its sidecar with this build's backup "
+                  "and patch (no archive). Pass --yes to write.")
+            return 2
+        if _identity_changed(path, st):
+            raise BinaryError("the binary changed before backup refresh; aborted")
+        write_backup(path, data, replace_existing=True)
+        print("backup : refreshed for this build (previous backup replaced)")
+        status, detail = check_backup(path, digest)
     if status == "usable":
         print(f"backup : {detail}")
     elif status == "missing":
@@ -846,14 +876,14 @@ def cmd_patch(args) -> int:
             write_backup(path, data)
         except BinaryError as exc:
             print(f"error: could not create a backup: {exc}", file=sys.stderr)
-            print("       Nothing was written; the binary is unchanged.",
+            print("       The target binary is unchanged.",
                   file=sys.stderr)
             return 3
         status, detail = check_backup(path, digest)
         if status != "usable":
             print(f"error: backup is not usable after creation ({status}): {detail}",
                   file=sys.stderr)
-            print("       Nothing was written; the binary is unchanged.",
+            print("       The target binary is unchanged.",
                   file=sys.stderr)
             return 3
         print(f"backup : {detail}")
@@ -861,12 +891,12 @@ def cmd_patch(args) -> int:
         print(f"error: existing backup is not usable ({status}): {detail}",
               file=sys.stderr)
         if status == "wrong-build":
-            print("       It belongs to a different build. Move it away, or run "
-                  "`restore` against the build it belongs to.", file=sys.stderr)
+            print("       It belongs to a different build. Use --refresh-backup "
+                  "to replace it with this build's backup first.", file=sys.stderr)
         elif status == "dangling":
             print("       Remove that symlink and re-run to create a real backup.",
                   file=sys.stderr)
-        print("       Nothing was written; the binary is unchanged.", file=sys.stderr)
+        print("       The target binary is unchanged.", file=sys.stderr)
         return 3
 
     if read_backup_meta(path) is None:
@@ -1074,7 +1104,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_strict(add("self-test", cmd_self_test,
                    "recognise the build and validate the patch signature (read-only)"))
-    add_strict(add("patch", cmd_patch, "apply the patch (creates/verifies backup first)"))
+    sp = add_strict(add("patch", cmd_patch, "apply the patch (creates/verifies backup first)"))
+    sp.add_argument("--refresh-backup", action="store_true",
+                    help="replace a different build's backup and sidecar with "
+                         "this pristine build; keep no archive (requires --yes to write)")
     add_strict(add("verify", cmd_verify, "report the current patch state and backup pairing"))
     sp = add("restore", cmd_restore, "restore the pristine binary from its paired backup")
     sp.add_argument("--force", action="store_true",

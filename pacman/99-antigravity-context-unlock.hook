@@ -15,10 +15,10 @@
 #
 # 3. Backup pairing across package upgrades: when the `antigravity` package
 #    installs a new upstream binary, an existing `.ctxunlock-backup` from the
-#    previous build will NOT match the new binary. By design, `patch` refuses to
-#    overwrite a mismatched backup (exit code 3) so you never lose provenance;
-#    archive or remove the previous build's backup + `.json` sidecar before
-#    re-patching a newly verified build.
+#    previous build will NOT match the new binary. `--refresh-backup` replaces
+#    that backup + `.json` sidecar with a paired backup of the new pristine binary
+#    before patching. Only the latest build's backup is kept; no archive is made.
+#    Structural checks remain mandatory; --strict-build is NOT enabled.
 
 [Trigger]
 Operation = Install
@@ -29,4 +29,4 @@ Target = antigravity
 [Action]
 Description = Patching Antigravity desktop engine (language_server) to unlock the 256K context limit...
 When = PostTransaction
-Exec = /usr/bin/python3 /usr/local/share/antigravity-context-unlock/antigravity_context_unlock.py patch --yes
+Exec = /usr/bin/python3 /usr/local/share/antigravity-context-unlock/antigravity_context_unlock.py patch --yes --refresh-backup

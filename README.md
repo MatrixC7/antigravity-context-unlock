@@ -60,7 +60,7 @@
 git clone <repository-url> ~/.local/share/antigravity-context-unlock
 cd ~/.local/share/antigravity-context-unlock
 
-# 1. 只读自检：解析 Go 符号表、校验 59 字节指令窗口签名与已知构建哈希（不修改任何文件）
+# 1. 只读自检：解析 Go 符号表、校验 59 字节指令窗口（默认不强制构建哈希白名单）
 python3 antigravity_context_unlock.py self-test
 
 # 2. 应用补丁（首次运行自动在同目录创建原子备份 language_server.ctxunlock-backup 及哈希元数据）
@@ -76,13 +76,14 @@ python3 antigravity_context_unlock.py verify
 
 `/opt/Antigravity/resources/bin/language_server` 由系统软件包（如 Arch Linux 上的 `antigravity`）管理，每次软件包升级都会用新版原厂二进制覆盖该文件：
 
-1. **手动更新（推荐）**：
-   - 升级完成后先运行 `python3 antigravity_context_unlock.py self-test`，查看新版本是否通过结构签名检查。
-   - 由于旧备份文件（`language_server.ctxunlock-backup`）属于升级前的旧构建，直接运行 `patch` 时脚本会因备份哈希与当前二进制不一致而**主动安全中止（退出码 3）**，防止覆盖历史备份。
-   - 确认新版本自检通过后，将旧版 `language_server.ctxunlock-backup` 与 `.ctxunlock-backup.json` 移存或删除，再执行 `patch --yes` 为新构建生成配对备份并完成修补。
+1. **手动更新**：
+   - 升级完成后可先运行 `python3 antigravity_context_unlock.py self-test`，查看新版本是否通过结构签名检查。默认不要求 SHA256 在白名单中；只有显式指定 `--strict-build` 才强制白名单。
+   - 执行 `sudo python3 antigravity_context_unlock.py patch --yes --refresh-backup`：若现有备份属于另一构建，脚本先将新版原文件及 `.json` 侧车写入临时文件并同步，再原子替换旧备份、更新侧车，确认配对后修补。**只保留最新构建的一份原版备份，不再生成历史归档。**
+   - 不带 `--refresh-backup` 时仍保留原行为：遇到不同构建的备份退出 `3`，不覆盖旧备份。不带 `--yes` 时仅预览，不写入。已修补文件保持幂等，不刷新备份。
+   - 新备份准备失败时旧备份不受影响；目标文件只在新版备份确认可用后才修补。不支持的指令结构、不可读备份、当前构建的侧车哈希不一致仍会中止；刷新时也拒绝替换符号链接或非普通文件。旧工具已生成的归档不会自动删除，可按需手动清理。
 2. **Pacman 自动更新 Hook（可选，适用于 Arch Linux / EndeavourOS / CachyOS）**：
-   - 仓库 [`pacman/99-antigravity-context-unlock.hook`](pacman/99-antigravity-context-unlock.hook) 提供了 `PostTransaction` Hook 模板。
-   - **安全提示**：Pacman Hook 由 `libalpm` 以 `root` 权限直接通过 `execv(3)` 调用（不经过 shell，`~` 与 `$HOME` 均不展开）。若启用自动 Hook，务必先将 `antigravity_context_unlock.py` 安装至 `root:root` 拥有且普通用户不可写的系统目录（如 `/usr/local/share/antigravity-context-unlock/`），切勿在 Hook 中指向普通用户主目录下的可写路径；且跨版本升级后同样需清理上一版本的旧备份文件。
+   - 仓库 [`pacman/99-antigravity-context-unlock.hook`](pacman/99-antigravity-context-unlock.hook) 提供了 `PostTransaction` Hook 模板，已使用 `patch --yes --refresh-backup`，新版通过结构校验即可自动刷新最新备份并重新修补。已有安装若已使用此参数，只需更新脚本；更早的安装还需同步 Hook 的 `Exec` 参数。
+   - **安全提示**：Pacman Hook 由 `libalpm` 以 `root` 权限直接通过 `execv(3)` 调用（不经过 shell，`~` 与 `$HOME` 均不展开）。若启用自动 Hook，务必先将 `antigravity_context_unlock.py` 安装至 `root:root` 拥有且普通用户不可写的系统目录（如 `/usr/local/share/antigravity-context-unlock/`），切勿在 Hook 中指向普通用户主目录下的可写路径。
 
 ---
 
@@ -127,7 +128,7 @@ python3 verify_live.py --expect 983040
 
 ### 4. 离线单元测试套件
 
-包含 38 项自动化测试（合成 Go 1.18+ ELF64 夹具、59 字节窗口边界与立即数假阳性拦截、备份侧车与单快照还原竞争防护、真实二进制临时副本往返哈希校验及会话解析器测试）：
+包含自动化测试（合成 Go 1.18+ ELF64 夹具、59 字节窗口边界与立即数假阳性拦截、跨版本单份备份刷新与干跑/中断保护、备份侧车与单快照还原竞争防护、真实二进制临时副本往返哈希校验及会话解析器测试）：
 
 ```bash
 python3 -B -m unittest discover -s tests -v
@@ -157,7 +158,7 @@ python3 -B -m unittest discover -s tests -v
 
 ### 安全防护设计
 - **全文件唯一 59 字节指令窗口**：同时校验补丁点前 30 字节、补丁点 8 字节与补丁点后 21 字节，要求该 59 字节序列在全文件中唯一出现且完整落在目标函数 `[va, end)` 内，杜绝误匹配指令立即数或数据表；若未来构建函数结构变化，脚本以退出码 `3` 安全中止，不写入任何字节。
-- **强制前置备份与侧车校验**：补丁提交前必须确认同目录存在匹配原版二进制的备份文件（`language_server.ctxunlock-backup`，通过 `os.link` 原子创建，绝不静默覆盖已有备份）及 `.ctxunlock-backup.json` 哈希侧车。
+- **强制前置备份与侧车校验**：补丁提交前必须确认同目录存在匹配原版二进制的备份文件（`language_server.ctxunlock-backup`，首次通过 `os.link` 原子创建）并校验已有 `.ctxunlock-backup.json` 哈希侧车。`--refresh-backup` 仅在当前文件为已通过结构校验的原版且备份属于另一构建时，通过 `os.replace` 将旧备份替换为新版配对备份；不保留历史版本。
 - **单快照决策与原子替换**：每次运行仅读取一次目标二进制快照，写入前重新核对磁盘 `inode / dev / size / mtime_ns` 防止并发升级冲突，并通过同目录临时文件 + `fsync` + `os.replace` + 目录 `fsync` 完成原子替换。
 - **内容级配对还原**：`restore` 仅读取一次备份快照，并在写回前验证“对备份重施 8 字节补丁能否逐字节复现当前目标文件”，防止误将旧版本的备份还原到新版本安装目录中。
 

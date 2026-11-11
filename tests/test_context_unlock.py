@@ -366,6 +366,8 @@ class TestBackupGuarantees(unittest.TestCase):
             p = os.path.join(self.tmp, name)
             if os.path.islink(p) or os.path.isfile(p):
                 os.unlink(p)
+            elif os.path.isdir(p):
+                shutil.rmtree(p)
         os.rmdir(self.tmp)
 
     def _write(self, path: str, data):
@@ -404,6 +406,177 @@ class TestBackupGuarantees(unittest.TestCase):
         self.assertEqual(tool.main(["patch", "--binary", self.path, "--yes"]), 0)
         self.assertEqual(self._read(self.backup), self.pristine)
         self.assertTrue(os.path.exists(self.meta))
+
+    def _archives(self):
+        return list(Path(self.tmp).glob("engine.ctxunlock-backup.old-*"))
+
+    def _seed_upgrade(self):
+        upgraded = self.pristine + b"new-build"
+        self._write(self.path, upgraded)
+        self._write(self.backup, self.pristine)
+        meta = json.dumps({"original_sha256": tool._sha256(self.pristine)})
+        self._write(self.meta, meta)
+        return upgraded, meta.encode()
+
+    def test_refresh_replaces_old_pair_and_restores_new_build(self):
+        upgraded, _ = self._seed_upgrade()
+        args = ["patch", "--binary", self.path, "--refresh-backup", "--yes"]
+        self.assertEqual(tool.main(args), 0)
+        self.assertEqual(self._read(self.backup), upgraded)
+        self.assertEqual(tool.read_backup_meta(self.path)["original_sha256"],
+                         tool._sha256(upgraded))
+        self.assertEqual(tool.check_backup(self.path, tool._sha256(upgraded))[0], "usable")
+        metadata = self._read(self.meta)
+        self.assertEqual(tool.main(["verify", "--binary", self.path]), 0)
+        self.assertEqual(tool.main(args), 0)  # already patched: no refresh
+        self.assertEqual(self._read(self.meta), metadata)
+        self.assertEqual(tool.main(["restore", "--binary", self.path, "--yes"]), 0)
+        self.assertEqual(self._read(self.path), upgraded)
+        self.assertEqual(tool.main(args), 0)  # paired pristine: reuse new backup
+        self.assertEqual(self._read(self.meta), metadata)
+        self.assertEqual(sorted(os.listdir(self.tmp)),
+                         sorted(["engine", Path(self.backup).name, Path(self.meta).name]))
+
+    def test_refresh_dry_run_leaves_every_file_unchanged(self):
+        upgraded, metadata = self._seed_upgrade()
+        self.assertEqual(tool.main(["patch", "--binary", self.path, "--refresh-backup"]), 2)
+        self.assertEqual(self._read(self.path), upgraded)
+        self.assertEqual(self._read(self.backup), self.pristine)
+        self.assertEqual(self._read(self.meta), metadata)
+        self.assertEqual(self._archives(), [])
+
+    def test_refresh_unsupported_build_keeps_old_pair(self):
+        _, metadata = self._seed_upgrade()
+        unsupported = self.pristine.replace(tool.CONTEXT_PRISTINE, b"\x90" * 59)
+        self._write(self.path, unsupported)
+        self.assertEqual(tool.main([
+            "patch", "--binary", self.path, "--refresh-backup", "--yes",
+        ]), 3)
+        self.assertEqual(self._read(self.path), unsupported)
+        self.assertEqual(self._read(self.backup), self.pristine)
+        self.assertEqual(self._read(self.meta), metadata)
+        self.assertEqual(self._archives(), [])
+
+    def test_refresh_strict_build_still_rejects_unlisted(self):
+        upgraded, _ = self._seed_upgrade()
+        self.assertEqual(tool.main([
+            "patch", "--binary", self.path, "--refresh-backup", "--yes", "--strict-build",
+        ]), 3)
+        self.assertEqual(self._read(self.path), upgraded)
+        self.assertEqual(self._archives(), [])
+
+    def test_refresh_already_patched_does_not_archive_stale_backup(self):
+        upgraded, _ = self._seed_upgrade()
+        patched = upgraded.replace(tool.CONTEXT_PRISTINE, tool.CONTEXT_PATCHED)
+        self._write(self.path, patched)
+        self.assertEqual(tool.main([
+            "patch", "--binary", self.path, "--refresh-backup", "--yes",
+        ]), 0)
+        self.assertEqual(self._read(self.path), patched)
+        self.assertEqual(self._read(self.backup), self.pristine)
+        self.assertEqual(self._archives(), [])
+
+    def test_refresh_keeps_only_latest_backup_over_multiple_upgrades(self):
+        upgraded, _ = self._seed_upgrade()
+        args = ["patch", "--binary", self.path, "--refresh-backup", "--yes"]
+        self.assertEqual(tool.main(args), 0)
+        latest = upgraded + b"next-build"
+        self._write(self.path, latest)
+        self.assertEqual(tool.main(args), 0)
+        self.assertEqual(self._read(self.backup), latest)
+        self.assertEqual(tool.read_backup_meta(self.path)["original_sha256"],
+                         tool._sha256(latest))
+        self.assertEqual(sorted(os.listdir(self.tmp)),
+                         sorted(["engine", Path(self.backup).name, Path(self.meta).name]))
+
+    def test_refresh_refuses_backup_symlink(self):
+        self._write(self.path, self.pristine + b"new-build")
+        target = os.path.join(self.tmp, "old-original")
+        self._write(target, self.pristine)
+        os.symlink(target, self.backup)
+        self.assertEqual(tool.main([
+            "patch", "--binary", self.path, "--refresh-backup", "--yes",
+        ]), 3)
+        self.assertTrue(os.path.islink(self.backup))
+        self.assertEqual(self._read(target), self.pristine)
+        self.assertEqual(self._archives(), [])
+
+    def test_refresh_still_refuses_bad_sidecar_for_current_build(self):
+        self._write(self.path, self.pristine)
+        self._write(self.backup, self.pristine)
+        self._write(self.meta, '{"original_sha256": "deadbeef"}')
+        self.assertEqual(tool.main([
+            "patch", "--binary", self.path, "--refresh-backup", "--yes",
+        ]), 3)
+        self.assertEqual(self._read(self.path), self.pristine)
+        self.assertEqual(self._archives(), [])
+
+    def test_refresh_detects_concurrent_upgrade_before_archiving(self):
+        upgraded, _ = self._seed_upgrade()
+        with mock.patch.object(tool, "_identity_changed", return_value=True):
+            self.assertEqual(tool.main([
+                "patch", "--binary", self.path, "--refresh-backup", "--yes",
+            ]), 3)
+        self.assertEqual(self._read(self.path), upgraded)
+        self.assertEqual(self._archives(), [])
+
+    def test_refresh_backup_replace_failure_preserves_old_backup(self):
+        upgraded, _ = self._seed_upgrade()
+        replace = os.replace
+
+        def fail_backup_replace(source, destination):
+            if destination == self.backup:
+                raise OSError("simulated backup replace failure")
+            return replace(source, destination)
+
+        with mock.patch.object(tool.os, "replace", side_effect=fail_backup_replace):
+            self.assertEqual(tool.main([
+                "patch", "--binary", self.path, "--refresh-backup", "--yes",
+            ]), 3)
+        self.assertEqual(self._read(self.path), upgraded)
+        self.assertEqual(self._read(self.backup), self.pristine)
+        self.assertFalse(os.path.lexists(self.meta))
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["engine", Path(self.backup).name])
+        # Removing stale metadata first makes retry safe even after partial failure.
+        self.assertEqual(tool.main([
+            "patch", "--binary", self.path, "--refresh-backup", "--yes",
+        ]), 0)
+        self.assertEqual(tool.check_backup(self.path, tool._sha256(upgraded))[0], "usable")
+
+    def test_refresh_staging_failure_preserves_old_pair(self):
+        upgraded, metadata = self._seed_upgrade()
+        with mock.patch.object(tool.json, "dump", side_effect=OSError("simulated disk full")):
+            self.assertEqual(tool.main([
+                "patch", "--binary", self.path, "--refresh-backup", "--yes",
+            ]), 3)
+        self.assertEqual(self._read(self.path), upgraded)
+        self.assertEqual(self._read(self.backup), self.pristine)
+        self.assertEqual(self._read(self.meta), metadata)
+        self.assertEqual(sorted(os.listdir(self.tmp)),
+                         sorted(["engine", Path(self.backup).name, Path(self.meta).name]))
+
+    def test_refresh_sidecar_replace_failure_keeps_complete_new_backup(self):
+        upgraded, _ = self._seed_upgrade()
+        replace = os.replace
+
+        def fail_sidecar_replace(source, destination):
+            if destination == self.meta:
+                raise OSError("simulated sidecar replace failure")
+            return replace(source, destination)
+
+        with mock.patch.object(tool.os, "replace", side_effect=fail_sidecar_replace):
+            self.assertEqual(tool.main([
+                "patch", "--binary", self.path, "--refresh-backup", "--yes",
+            ]), 3)
+        self.assertEqual(self._read(self.path), upgraded)
+        self.assertEqual(self._read(self.backup), upgraded)
+        self.assertFalse(os.path.lexists(self.meta))
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["engine", Path(self.backup).name])
+        self.assertEqual(tool.main([
+            "patch", "--binary", self.path, "--refresh-backup", "--yes",
+        ]), 0)
+        self.assertEqual(tool.main(["restore", "--binary", self.path, "--yes"]), 0)
+        self.assertEqual(self._read(self.path), upgraded)
 
     def test_restore_uses_single_snapshot(self):
         other = self.pristine + b"other-build"

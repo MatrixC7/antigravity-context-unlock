@@ -5,7 +5,7 @@
 - **适用软件**：Antigravity 桌面端应用（核心推理引擎 `/opt/Antigravity/resources/bin/language_server`，**非**命令行工具 `antigravity-cli` / `/usr/bin/agy`；命令行版请参阅 [`agy-context-unlock`](https://github.com/MatrixC7/agy-context-unlock)）
 - **已验证版本**：`antigravity 2.31.0-1` Linux x86-64（`Built at CL: 1017595969`；原版 `SHA256: e49711c4f7b2fa0e62c0e130c9566579423094b63647bdce82f4ddd81eeb983f`，补丁后 `SHA256: a1ceb2f2064835273524310592dc35998767f6bec81d05882117b9d1b85c7e6e`），并通过动态解析 Go `pclntab` 符号表与 59 字节指令窗口签名支持跨版本定位
 - **各通道机制与适用说明**：
-  - **Google OAuth 原生通道**（`daily-cloudcode-pa.googleapis.com`）：未修补时，`Gemini 3.8 Flash` 与 `Gemini 4 Argon` 的本地预算均被限制在 `256,000` tokens，且桌面端不存在 UI 档位切换器或覆盖环境变量；**应用本仓库 8 字节补丁后，本地预算自动采用引擎计算的物理上界 `maxTokens - maxOutputTokens`（如 `983,040` tokens，提升 3.84 倍）**
+  - **Google OAuth 原生通道**（`daily-cloudcode-pa.googleapis.com`）：未修补时，`Gemini 3.8 Flash`、`Gemini 4 Argon`、`Gemini 4 Carbon` 与桌面端 `Claude 5.5` 的本地预算均被限制在 `256,000` tokens，且桌面端不存在 UI 档位切换器或覆盖环境变量；**应用本仓库 8 字节补丁后，本地预算自动采用引擎计算的物理上界 `maxTokens - maxOutputTokens`**（例如 `Gemini 3.8 Flash` / `Gemini 4 Argon` 提升至 **`983,040`**，`Claude 5.5` 提升至 **`872,000`**，预留 256 Ki 超长输出的 `Gemini 4 Carbon` 提升至 **`786,432`**）
   - **企业网关 / 自定义模型通道**（通过 `~/.antigravity/settings.json` 的 `gateway` 或 `AGY_LLM_GATEWAY_*` 接入，`apiProvider = 31`）：桌面端默认已绕开 256K 钳位分支，直接按网关目录参数计算预算（如 `1,000,000 - 128,000 = 872,000` tokens），**无需二进制补丁即可通过目录参数配置**
 - **运行依赖**：仅需 Python 3 标准库（零第三方依赖）
 - **许可证**：[MIT License](LICENSE)
@@ -41,7 +41,10 @@
 
 1. **零硬编码阈值常数**：寄存器 `esi` 由引擎自身在站点前序指令（`0x6ab7453..0x6ab7459`）根据当前模型的 `ModelInfo` 动态算出：
    $$\text{MaxTokenLimit} = \text{ModelInfo.MaxTokens} - \text{ModelInfo.MaxOutputTokens}$$
-   对于 `Gemini 3.8 Flash`（`1,048,576 - 65,536`），运行期自动得到 **`983,040`**（原版 `256,000` 的 **3.840 倍**），无需手动维护配置文件或启动包装脚本。
+   官方目录中同一模型家族的不同思考强度（Low / Medium / High）共享相同的 `MaxOutputTokens`，补丁在运行期按模型代际自动适配各自的物理输入上界，无需手动维护配置文件或启动包装脚本：
+   - `Gemini 3.8 Flash` / `Gemini 4 Argon`（`1,048,576 - 65,536`）：自动得到 **`983,040`**（UI 显示 **`983.0K`**，原版 `256,000` 的 **3.840 倍**）；
+   - `Claude Opus 5.5` / `Claude Sonnet 5.5`（`1,000,000 - 128,000`）：自动得到 **`872,000`**（UI 显示 **`872.0K`**，原版的 **3.406 倍**）；
+   - `Gemini 4 Carbon`（`1,048,576 - 262,144`，官方为其开放 256 Ki 单轮最大输出空间）：自动得到 **`786,432`**（UI 显示 **`786.4K`**，原版的 **3.072 倍**）。
 2. **满足引擎自身的上界校验**：在常规模型参数（`0 < maxOutputTokens < maxTokens`）下，写入值恰好等于后续校验函数 `utils.ValidateCheckpointConfigForModelInfo`（`0x6ab74a0`）允许的最大合法上界 `ctx - maxOutputTokens`，不会触发内部配置校验错误。
 3. **完整保留其余策略语义**：补丁仅改写偏移 `+0xc`（`MaxTokenLimit`），策略合并阶段写入的 `use_model_reported_token_count`（决定使用服务端真实 Token 前缀而非粗糙字节估算）、`token_threshold`、`strategy`、`is_sync`、延续摘要提示词及单条消息 `192 KB` 截断逻辑均保持原样。
 
@@ -57,7 +60,7 @@
 ### 标准操作流程
 
 ```bash
-git clone <repository-url> ~/.local/share/antigravity-context-unlock
+git clone https://github.com/MatrixC7/antigravity-context-unlock.git ~/.local/share/antigravity-context-unlock
 cd ~/.local/share/antigravity-context-unlock
 
 # 1. 只读自检：解析 Go 符号表、校验 59 字节指令窗口（默认不强制构建哈希白名单）
@@ -89,11 +92,13 @@ python3 antigravity_context_unlock.py verify
 
 ## 4. 适用场景与各通道表现对比
 
-| 客户端与接入通道 | 代表模型 | 未修补时的本地预算与表现 | 修补后的本地预算与表现 |
+| 客户端与接入通道 | 代表模型（Low / Medium / High 思考强度同值） | 未修补时的本地预算与表现 | 修补后的本地预算与表现 |
 |---|---|---|---|
-| **Antigravity 桌面端**<br>Google OAuth 原生通道 | `Gemini 3.8 Flash (High)`<br>`Gemini 4 Argon (High)` | `max_context_tokens = 256,000`<br>（受控填充下服务端 SSE 约 **234K**、DB 估算约 **425K–438K** 时触发 `step_type=23` 压缩） | **`max_context_tokens = 983,040`**（`1,048,576 - 65,536`）<br>（Flash 实测连续 40 轮、DB 估算达 **1,117,452** 全程 0 次压缩） |
+| **Antigravity 桌面端**<br>Google OAuth 原生通道 | `Gemini 3.8 Flash`<br>`Gemini 4 Argon` | `max_context_tokens = 256,000`<br>（受控填充下服务端 SSE 约 **234K**、DB 估算约 **425K–438K** 时触发 `step_type=23` 压缩） | **`max_context_tokens = 983,040`**（`1,048,576 - 65,536`，UI 显示 `983.0K`）<br>（Flash 实测连续 40 轮、DB 估算达 **1,117,452** 全程 0 次压缩） |
+| **Antigravity 桌面端**<br>Google OAuth 原生通道 | `Gemini 4 Carbon` | `max_context_tokens = 256,000` | **`max_context_tokens = 786,432`**（`1,048,576 - 262,144`，UI 显示 `786.4K`，预留 256 Ki 单次最大输出） |
+| **Antigravity 桌面端**<br>Google OAuth 原生通道 | `Claude Opus 5.5`<br>`Claude Sonnet 5.5` | `max_context_tokens = 256,000`<br>（桌面端 `IDE` 子配置屏蔽了 `claude-1m_840k` 变体） | **`max_context_tokens = 872,000`**（`1,000,000 - 128,000`，UI 显示 `872.0K`） |
 | **Antigravity 桌面端**<br>企业网关通道（`apiProvider = 31`） | `<gateway>/gemini-3.8-flash-high`<br>`<gateway>/gemini-4-argon-high`<br>`<gateway>/deepseek-v4.1-flash-1017` | **默认已为 `872,000`**（当目录声明 `1,000,000 / 128,000` 时；实测 SSE 达 **625K–718K**、请求体达 **3.49 MB** 后才压缩） | **无需打二进制补丁**；需要调整预算时直接修改网关目录（`models.listSource`）返回的 `maxTokens` / `maxOutputTokens` 即可 |
-| *(对照)* **`antigravity-cli`（`agy`）**<br>原生通道 & 企业网关通道 | 原生及网关各模型 | 两条通道均被钳位在 **`256,000`**，且受单模型白名单与 Feature Flag 阻断 | 需使用针对 CLI 的 20 字节补丁工具（[`agy-context-unlock`](https://github.com/MatrixC7/agy-context-unlock)）解锁 `/model` 与 `settings.json` |
+| *(对照)* **`antigravity-cli`（`agy`）**<br>原生通道 & 企业网关通道 | 原生及网关各模型 | 原生 Gemini 与网关模型被钳位在 **`256,000`**（CLI 下 Claude 5.5 默认命中 `840,000`），且受单模型白名单与 Feature Flag 阻断 | 需使用针对 CLI 的 20 字节补丁工具（[`agy-context-unlock`](https://github.com/MatrixC7/agy-context-unlock)）解锁 `/model` 与 `settings.json`（`"900K"` 下 Argon/Flash 为 `900,000`，Claude 5.5 / Carbon 自动钳位至物理上界 `872,000` / `786,432`） |
 
 ---
 

@@ -167,9 +167,9 @@ cortex.(*CascadeManager).getCascadeConfig                        0x7a4f9ac (调�
 
 ### 4.3 与 `ValidateCheckpointConfigForModelInfo`（`0x6ab74a0`）的兼容性分析
 
-紧随 `ClampCheckpointConfigForModelInfo` 之后，`clampAndValidateConfig` 会调用 `utils.ValidateCheckpointConfigForModelInfo`（`0x6ab74a0`），校验约束为无符号比较 `MaxTokenLimit <= ctx - maxOutputTokens`（等号合法）。
-- 对于 `Gemini 3.8 Flash` 与 `Gemini 4 Argon`（`maxOutputTokens = 65,536 < maxTokens = 1,048,576`），`cmovb` 算出的 `esi = 983,040` 恰好等于校验上界，100% 通过校验。
-- **理论边界说明**：若未来某个异常模型目录条目配置了 `maxOutputTokens >= maxTokens`，`Clamp` 处的无符号 `cmovb` 会保留 `esi = ctx`，而 `Validate` 的上界为 `0`，两者算式并非在一切退化参数下恒等。
+紧随 `ClampCheckpointConfigForModelInfo` 之后，`clampAndValidateConfig` 会传入 `PlannerConfig.MaxOutputTokens`（当模型目录 `MaxOutputTokens > 0` 时与 `ModelInfo.MaxOutputTokens` 等值）并调用 `utils.ValidateCheckpointConfigForModelInfo`（`0x6ab74a0`），校验约束为无符号比较 `MaxTokenLimit <= ctx - maxOutputTokens`（等号合法）。
+- 对于官方原生目录中的所有主力对话模型——包括 `Gemini 3.8 Flash` / `Gemini 4 Argon`（`65,536 < 1,048,576` → `esi = 983,040`）、`Claude Opus 5.5` / `Claude Sonnet 5.5`（`128,000 < 1,000,000` → `esi = 872,000`）以及单次输出上限扩展至 256 Ki 的 `Gemini 4 Carbon`（`262,144 < 1,048,576` → `esi = 786,432`）——`cmovb` 算出的 `esi` 均恰好等于校验上界，100% 通过校验。
+- **理论边界说明**：若未来某个异常模型目录条目配置了 `maxOutputTokens >= maxTokens`（例如仅用于图像生成的 `gemini-3.1-flash-image` 宣告 `65,536 / 65,536`），`Clamp` 处的无符号 `cmovb` 会保留 `esi = ctx`，而 `Validate` 的上界为 `0`，两者算式并非在一切退化参数下恒等。
 
 ### 4.4 明确保持不变的引擎组件
 

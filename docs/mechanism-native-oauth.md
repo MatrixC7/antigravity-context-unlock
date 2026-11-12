@@ -59,15 +59,21 @@
 5. `https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
 6. `https://aicode.googleapis.com/v1alpha:fetchConfig`
 
-在引擎本地 RPC 接口 `GetAvailableModels` 导出的完整目录快照（共 26 个模型条目）中，各模型家族按模型携带独立的 `CASCADE_USE_EXPERIMENT_CHECKPOINTER` 策略 JSON：
+在引擎本地 RPC 接口 `GetAvailableModels` 导出的完整目录快照中，各模型的容量上限（`maxTokens` / `maxOutputTokens`）、思考强度（`thinkingLevel`：`1 = Low`、`2 = Medium`、`3 = High`）及 `CASCADE_USE_EXPERIMENT_CHECKPOINTER` 策略汇总如下（**同一模型家族内 Low / Medium / High 三档思考强度的 `maxOutputTokens` 完全一致**）：
 
-| 模型显示名称 | 内部枚举标识 | `maxTokens` | 策略 `max_token_limit` | 策略 `strategy` | `is_sync` |
-|---|---|---:|---:|---|---|
-| **Gemini 4 Argon (High / Medium / Low)** | `M417` / `M418` / `M419` | `1,048,576` | **`256,000`** | `SAME_MODEL` | `true` |
-| **Gemini 3.8 Flash (High / Medium / Low)** | `M318` / `M319` / `M320` | `1,048,576` | **`256,000`** | `SAME_MODEL` | `true` |
-| Gemini 3.5 Flash Lite / 2.5 Pro / 2.5 Flash 等 | `M50` / `M198` / `M18` 等 | `1,048,576` | **`128,000`** | `SINGLE_PROMPT` | `false` |
-| Claude Opus 5.5 / Sonnet 5.5（静态目录条目） | `M400`–`M405` | `1,000,000` | `256,000`（另含 `/claude-1m_840k` 变体 `840,000`） | `SAME_MODEL` | `true` |
-| GPT-OSS 120B (Medium) | `MODEL_OPENAI_GPT_OSS_120B_MEDIUM` | `131,072` | **`80,000`** | `UNSPECIFIED` | `false` |
+| 模型显示名称与用途 | 模型 ID / 内部枚举标识 | `thinkingLevel` | `maxTokens` | 官方 `maxOutputTokens` | 未修补默认预算 | 8 字节补丁后预算（`maxTokens - maxOutputTokens`） |
+|---|---|---:|---:|---:|---:|---:|
+| **Gemini 4 Carbon (Low / Medium / High)** | `gemini-4-carbon-{low,medium,high}`<br>（`M438` / `M437` / `M427`） | `1` / `2` / `3` | `1,048,576` | **`262,144`** (256 Ki) | **`256,000`** | **`786,432`**（UI 显示 `786.4K`） |
+| **Gemini 4 Argon (Low / Medium / High)** | `gemini-4-argon-{low,medium,high}`<br>（`M419` / `M418` / `M417`） | `1` / `2` / `3` | `1,048,576` | **`65,536`** (64 Ki) | **`256,000`** | **`983,040`**（UI 显示 `983.0K`） |
+| **Gemini 3.8 Flash (Low / Medium / High)** | `gemini-3.8-flash-{low,medium,high}`<br>（`M320` / `M319` / `M318`；另有 `tiered` `M322`） | `1` / `2` / `3` | `1,048,576` | **`65,536`** (64 Ki) | **`256,000`** | **`983,040`**（UI 显示 `983.0K`） |
+| **Claude Opus 5.5 (Low / Medium / High)** | `claude-opus-5-5-{low,medium,high}`<br>（`M400` / `M401` / `M402`） | `1` / `2` / `3` | `1,000,000` | **`128,000`** (128K) | **`256,000`** *(注 1)* | **`872,000`**（UI 显示 `872.0K`） |
+| **Claude Sonnet 5.5 (Low / Medium / High)** | `claude-sonnet-5-5-{low,medium,high}`<br>（`M403` / `M404` / `M405`） | `1` / `2` / `3` | `1,000,000` | **`128,000`** (128K) | **`256,000`** *(注 1)* | **`872,000`**（UI 显示 `872.0K`） |
+| Gemini 3 Flash（旧版主力） | `gemini-3-flash`（`M18`） | `3` | `1,048,576` | **`65,536`** | `128,000` | **`983,040`** |
+| Gemini 3.5 / 3.1 Flash Lite & 2.5 Pro（轻量 / 子任务 / 默认摘要模型） | `M198` / `M50` / `MODEL_GOOGLE_GEMINI_2_5_*` | `1`（2.5 Pro 为 `thinkingBudget=1024`） | `1,048,576` | **`65,535`** | `128,000` | **`983,041`** |
+| Gemini 3.1 Flash Image / Tab 补全小模型 | `M21`（生图）/ `M19`, `M28`（Tab） | — | `65,536` / `16,384` | `65,536` / `4,096` | — | *(非主对话路径)* |
+| GPT-OSS 120B (Medium) | `MODEL_OPENAI_GPT_OSS_120B_MEDIUM` | `thinkingBudget=8192` | `131,072` | `32,768` | **`80,000`** | **`98,304`** |
+
+> **注 1（桌面端 IDE 与 CLI 在 Claude 5.5 默认变体上的差异）**：内嵌配置表 `base` 虽设有 `"checkpoint-variant": "claude-1m_840k"`（使命令行工具 `agy` 的 `CLI` 子配置默认命中 `840,000` 变体），但桌面端的 `subclients.IDE` 显式覆写了 `"checkpoint-variant": null`，导致未修补桌面端回退至裸键 `256,000`；应用本仓库 8 字节补丁后则统一提升至物理上界 `1,000,000 - 128,000 = 872,000`。
 
 ### 步骤 2：本地构造 `CheckpointConfig`（两层钳位与策略合并）
 

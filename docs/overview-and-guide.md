@@ -99,6 +99,23 @@ $$\text{当前待发轨迹内部计数} = \underbrace{\text{上一轮为止的�
 
 ---
 
+### 1.5 为什么应用补丁后，`Gemini 4 Carbon` 在客户端显示上限是 `786.4K`，而 `Argon / Flash` 是 `983.0K`？不同思考强度（Low / Medium / High）会影响它吗？
+
+**因为模型宣告的 `MaxTokens` 是单次请求「输入 + 输出（含思维链 Thinking）」共享的总窗口，而官方给不同代际模型分配的单次最大输出预留（`MaxOutputTokens`）不同；但在同一模型家族内部，Low / Medium / High 三种思考强度的 `MaxOutputTokens` 完全一致。**
+
+- **思考强度不影响 `MaxOutputTokens`**：Google 官方目录（`GetAvailableModels`）在区分 Low / Medium / High 档位时，仅改变独立的 `thinkingLevel` 参数（`1` / `2` / `3`），同一模型家族三个档位的 `maxOutputTokens` 完全相同。
+- **不同模型家族的三档官方输出预留与补丁后输入预算**：
+
+  | 原生通道模型家族（Low / Medium / High 同值） | 官方总窗口 `maxTokens` | 官方最大输出 `maxOutputTokens` | 补丁后本地预算 `MaxTokens - MaxOutputTokens` | 前端进度条十进制显示（`÷ 1000`） |
+  |---|---:|---:|---:|---:|
+  | **Gemini 3.8 Flash / Gemini 4 Argon** | `1,048,576` (1 Mi) | **`65,536`** (64 Ki) | **`983,040`** | **983.0K** |
+  | **Claude Opus 5.5 / Claude Sonnet 5.5** | `1,000,000` (1M) | **`128,000`** (128K) | **`872,000`** | **872.0K** |
+  | **Gemini 4 Carbon** | `1,048,576` (1 Mi) | **`262,144`** (256 Ki) | **`786,432`** | **786.4K** |
+
+  也就是说，看到 `Gemini 4 Carbon` 显示 `786.4K` 正说明补丁已正常生效——因为官方将 Carbon 的单轮最大输出能力提升到了 4 倍（`262,144` tokens），引擎按物理上界公式扣除这部分输出预留后得到 `786,432`（`786.432K ≈ 786.4K`）。若在第三方企业网关下看到同名 Carbon 模型显示 `983.0K`，则是因为该网关目录将 `maxOutputTokens` 标成了传统的 `65,536`。
+
+---
+
 ## 2. 全景横向对比：桌面端原生通道 vs. 桌面端企业网关 vs. 命令行 `agy`
 
 | 对比维度 | 桌面端：Google OAuth 原生通道 | 桌面端：企业网关通道 | 命令行版：`antigravity-cli`（`agy`） |
